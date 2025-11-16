@@ -27,17 +27,26 @@ export default function HomeScreen() {
     null
   );
   const [isLoading, setIsLoading] = useState(true);
+  const [isLocationLoading, setIsLocationLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [showDetails, setShowDetails] = useState(false);
 
   useEffect(() => {
-    loadRoute();
-    getCurrentLocation();
+    const init = async () => {
+      // Najpierw pobierz lokalizację
+      await getCurrentLocation();
+      // Potem załaduj trasę
+      await loadRoute();
+    };
+    init();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const loadRoute = async () => {
     try {
-      setIsLoading(true);
+      if (!isLocationLoading) {
+        setIsLoading(true);
+      }
 
       const { loadMockData } = await import("@/data/mock-data");
       await loadMockData();
@@ -60,17 +69,25 @@ export default function HomeScreen() {
 
   const getCurrentLocation = async () => {
     try {
+      setIsLocationLoading(true);
       const location = await NavigationService.getCurrentLocation();
       if (location) {
         setCurrentLocation(location);
       }
-    } catch {}
+    } catch {
+      Alert.alert(
+        "Error",
+        "Unable to get current location. Please enable location services."
+      );
+    } finally {
+      setIsLocationLoading(false);
+    }
   };
 
   const handleRefresh = async () => {
     setIsRefreshing(true);
-    await loadRoute();
     await getCurrentLocation();
+    await loadRoute();
 
     try {
       await ApiService.syncPendingConfirmations();
@@ -111,18 +128,34 @@ export default function HomeScreen() {
     };
   };
 
-  if (isLoading) {
+  if (isLoading || isLocationLoading) {
     return (
       <View style={styles.centerContainer}>
         <ActivityIndicator size="large" color="#2196F3" />
-        <Text style={styles.loadingText}>Loading route...</Text>
+        <Text style={styles.loadingText}>
+          {isLocationLoading ? "Getting your location..." : "Loading route..."}
+        </Text>
+      </View>
+    );
+  }
+
+  if (!currentLocation) {
+    return (
+      <View style={styles.centerContainer}>
+        <Text style={styles.errorText}>Unable to get location</Text>
+        <TouchableOpacity
+          style={styles.retryButton}
+          onPress={getCurrentLocation}
+        >
+          <Text style={styles.retryButtonText}>Try Again</Text>
+        </TouchableOpacity>
       </View>
     );
   }
 
   if (!route) {
     return (
-      <View style={styles.container}>
+      <View style={styles.centerContainer}>
         <Text style={styles.errorText}>No route available</Text>
         <TouchableOpacity style={styles.retryButton} onPress={loadRoute}>
           <Text style={styles.retryButtonText}>Try Again</Text>

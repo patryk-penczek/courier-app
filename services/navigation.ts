@@ -18,7 +18,7 @@ export const NavigationService = {
       if (!hasPermission) return null;
 
       const location = await Location.getCurrentPositionAsync({
-        accuracy: Location.Accuracy.High
+        accuracy: Location.Accuracy.Balanced
       });
 
       return {
@@ -26,6 +26,21 @@ export const NavigationService = {
         longitude: location.coords.longitude
       };
     } catch {
+      // Jeśli nie uda się z timeout, spróbuj z ostatnią znaną lokalizacją
+      try {
+        const lastKnown = await Location.getLastKnownPositionAsync({
+          maxAge: 300000,
+          requiredAccuracy: 100
+        });
+
+        if (lastKnown) {
+          return {
+            latitude: lastKnown.coords.latitude,
+            longitude: lastKnown.coords.longitude
+          };
+        }
+      } catch {}
+
       return null;
     }
   },

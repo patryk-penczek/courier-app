@@ -1,7 +1,7 @@
 import { NavigationService } from "@/services/navigation";
 import { DeliveryPoint, Location as LocationType } from "@/types/delivery";
 import React, { useEffect, useRef, useState } from "react";
-import { StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import { StyleSheet, Text, View } from "react-native";
 import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from "react-native-maps";
 
 interface DeliveryMapProps {
@@ -15,113 +15,230 @@ interface RouteCoordinates {
   longitude: number;
 }
 
+interface RouteSegment {
+  coordinates: RouteCoordinates[];
+  color: string;
+  destinationId: string;
+  isDelivered: boolean;
+}
+
 export default function DeliveryMap({
   points,
   currentLocation,
   onPointPress
 }: DeliveryMapProps) {
   const mapRef = useRef<MapView>(null);
-  const [selectedPoint, setSelectedPoint] = useState<DeliveryPoint | null>(
-    null
-  );
-  const [routeCoordinates, setRouteCoordinates] = useState<RouteCoordinates[]>(
-    []
-  );
+  const [routeSegments, setRouteSegments] = useState<RouteSegment[]>([]);
+  const [isInitialized, setIsInitialized] = useState(false);
+  const [markersLoaded, setMarkersLoaded] = useState(false);
+  // Przechowuj mapę stałych numerów paczek (id -> numer)
+  const deliveryOrderMap = useRef<Map<string, number>>(new Map());
+  // Przechowuj poprzednie wartości, aby uniknąć niepotrzebnych rerenderów
+  const prevPointsRef = useRef<string>("");
+  const prevLocationRef = useRef<string>("");
+  const hasInitializedMap = useRef(false);
+
+  // Klucz do śledzenia zmian statusu punktów
+  const pointsStatusKey = points.map(p => `${p.id}-${p.status}`).join(",");
+
+  // Inicjalizuj stałe numery paczek przy pierwszym załadowaniu - tylko raz!
+  useEffect(() => {
+    if (!currentLocation || isInitialized) return;
+
+    const allPoints = points.map(point => ({
+      point,
+      distance: NavigationService.calculateDistance(
+        currentLocation,
+        point.location
+      )
+    }));
+
+    allPoints.sort((a, b) => a.distance - b.distance);
+
+    allPoints.forEach((item, index) => {
+      deliveryOrderMap.current.set(item.point.id, index + 1);
+    });
+
+    setIsInitialized(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentLocation, isInitialized]);
+
+  // Ustaw markersLoaded po krótkiej chwili, aby markery się załadowały
+  useEffect(() => {
+    if (isInitialized) {
+      // Resetuj markersLoaded gdy punkty się zmienią (zmiana statusu)
+      setMarkersLoaded(false);
+
+      const timer = setTimeout(() => {
+        setMarkersLoaded(true);
+      }, 1000);
+      return () => clearTimeout(timer);
+    }
+  }, [isInitialized, pointsStatusKey]);
 
   useEffect(() => {
-    const fetchRoute = async () => {
-      const allPoints = points
-        .filter(p => p.orderNumber)
-        .sort((a, b) => (a.orderNumber || 0) - (b.orderNumber || 0));
-
-      if (allPoints.length < 2) {
-        setRouteCoordinates([]);
+    const fetchRoutes = async () => {
+      if (!currentLocation || !isInitialized) {
+        setRouteSegments([]);
         return;
       }
 
-      let sortedPoints = [...allPoints];
+      // Sprawdź czy dane się zmieniły, aby uniknąć niepotrzebnych wywołań
+      const pointsKey = points.map(p => `${p.id}-${p.status}`).join(",");
+      const locationKey = `${currentLocation.latitude.toFixed(
+        6
+      )},${currentLocation.longitude.toFixed(6)}`;
 
-      if (currentLocation) {
-        const pointsWithDistance = allPoints.map(point => ({
-          point,
-          distance: Math.sqrt(
-            Math.pow(point.location.latitude - currentLocation.latitude, 2) +
-              Math.pow(point.location.longitude - currentLocation.longitude, 2)
-          )
-        }));
-
-        pointsWithDistance.sort((a, b) => a.distance - b.distance);
-
-        const closestIndex = allPoints.findIndex(
-          p => p.id === pointsWithDistance[0].point.id
-        );
-
-        if (closestIndex > 0) {
-          sortedPoints = [
-            ...allPoints.slice(closestIndex),
-            ...allPoints.slice(0, closestIndex)
-          ];
-        }
+      if (
+        prevPointsRef.current === pointsKey &&
+        prevLocationRef.current === locationKey
+      ) {
+        return;
       }
+
+      prevPointsRef.current = pointsKey;
+      prevLocationRef.current = locationKey;
+
+      // Podziel paczki na pending i delivered/failed
+      const pendingPoints = points.filter(p => p.status === "pending");
+      const deliveredPoints = points.filter(
+        p => p.status === "delivered" || p.status === "failed"
+      );
+
+      // Sortuj paczki pending według odległości od aktualnej lokalizacji
+      const pendingWithDistance = pendingPoints.map(point => ({
+        point,
+        distance: NavigationService.calculateDistance(
+          currentLocation,
+          point.location
+        )
+      }));
+
+      pendingWithDistance.sort((a, b) => a.distance - b.distance);
+      const sortedPendingPoints = pendingWithDistance.map(p => p.point);
+
+      // Funkcja generująca kolory - jasny niebieski dla najbliższej, granatowy dla kolejnych
+      const generateBlueColor = (index: number): string => {
+        // 1. najbliższa: jasny niebieski RGB(33, 150, 243) - pełna opacity
+        // 2. druga: granatowy RGB(13, 71, 161) z 60% opacity
+        // 3. trzecia: granatowy RGB(13, 71, 161) z 35% opacity
+        // 4+ kolejne: granatowy RGB(13, 71, 161) z 20% opacity
+        if (index === 0) {
+          return "rgb(33, 150, 243)"; // Jasny niebieski, pełna opacity
+        } else if (index === 1) {
+          return "rgba(13, 71, 161, 0.6)"; // Granatowy 60%
+        } else if (index === 2) {
+          return "rgba(13, 71, 161, 0.35)"; // Granatowy 35%
+        } else {
+          return "rgba(13, 71, 161, 0.2)"; // Granatowy 20%
+        }
+      };
 
       try {
         const GOOGLE_MAPS_API_KEY =
           process.env.EXPO_PUBLIC_GOOGLE_MAPS_API_KEY || "";
 
-        if (!GOOGLE_MAPS_API_KEY) {
-          const fallbackRoute = sortedPoints.map(p => ({
-            latitude: p.location.latitude,
-            longitude: p.location.longitude
-          }));
-          setRouteCoordinates(fallbackRoute);
-          return;
+        const segments: RouteSegment[] = [];
+
+        // Generuj trasy dla paczek pending
+        for (let i = 0; i < sortedPendingPoints.length; i++) {
+          const point = sortedPendingPoints[i];
+          const color = generateBlueColor(i);
+
+          let routeCoords: RouteCoordinates[];
+
+          if (GOOGLE_MAPS_API_KEY) {
+            try {
+              const origin = `${currentLocation.latitude},${currentLocation.longitude}`;
+              const destination = `${point.location.latitude},${point.location.longitude}`;
+              const url = `https://maps.googleapis.com/maps/api/directions/json?origin=${origin}&destination=${destination}&key=${GOOGLE_MAPS_API_KEY}`;
+
+              const response = await fetch(url);
+              const data = await response.json();
+
+              if (data.status === "OK" && data.routes.length > 0) {
+                routeCoords = decodePolyline(
+                  data.routes[0].overview_polyline.points
+                );
+              } else {
+                routeCoords = [currentLocation, point.location];
+              }
+            } catch {
+              routeCoords = [currentLocation, point.location];
+            }
+          } else {
+            routeCoords = [currentLocation, point.location];
+          }
+
+          segments.push({
+            coordinates: routeCoords,
+            color,
+            destinationId: point.id,
+            isDelivered: false
+          });
         }
 
-        const startPoint = sortedPoints[0].location;
-        const endPoint = sortedPoints[sortedPoints.length - 1].location;
-        const origin = `${startPoint.latitude},${startPoint.longitude}`;
-        const destination = `${endPoint.latitude},${endPoint.longitude}`;
+        // Dodaj zielone trasy dla dostarczonych paczek (10% opacity)
+        for (const point of deliveredPoints) {
+          let routeCoords: RouteCoordinates[];
 
-        let waypointsParam = "";
-        if (sortedPoints.length > 2) {
-          const middlePoints = sortedPoints.slice(1, -1);
-          const waypoints = middlePoints
-            .map(p => `${p.location.latitude},${p.location.longitude}`)
-            .join("|");
-          waypointsParam = `&waypoints=${waypoints}`;
+          if (GOOGLE_MAPS_API_KEY) {
+            try {
+              const origin = `${currentLocation.latitude},${currentLocation.longitude}`;
+              const destination = `${point.location.latitude},${point.location.longitude}`;
+              const url = `https://maps.googleapis.com/maps/api/directions/json?origin=${origin}&destination=${destination}&key=${GOOGLE_MAPS_API_KEY}`;
+
+              const response = await fetch(url);
+              const data = await response.json();
+
+              if (data.status === "OK" && data.routes.length > 0) {
+                routeCoords = decodePolyline(
+                  data.routes[0].overview_polyline.points
+                );
+              } else {
+                routeCoords = [currentLocation, point.location];
+              }
+            } catch {
+              routeCoords = [currentLocation, point.location];
+            }
+          } else {
+            routeCoords = [currentLocation, point.location];
+          }
+
+          segments.push({
+            coordinates: routeCoords,
+            color: "rgba(76, 175, 80, 0.2)", // Zielony z 20% opacity
+            destinationId: point.id,
+            isDelivered: true
+          });
         }
 
-        const url = `https://maps.googleapis.com/maps/api/directions/json?origin=${origin}&destination=${destination}${waypointsParam}&key=${GOOGLE_MAPS_API_KEY}`;
-
-        const response = await fetch(url);
-        const data = await response.json();
-
-        if (data.status === "OK" && data.routes.length > 0) {
-          const routePoints = decodePolyline(
-            data.routes[0].overview_polyline.points
-          );
-          setRouteCoordinates(routePoints);
-        } else {
-          const fallbackRoute = sortedPoints.map(p => ({
-            latitude: p.location.latitude,
-            longitude: p.location.longitude
-          }));
-          setRouteCoordinates(fallbackRoute);
-        }
+        setRouteSegments(segments);
       } catch {
-        const fallbackRoute = sortedPoints.map(p => ({
-          latitude: p.location.latitude,
-          longitude: p.location.longitude
-        }));
-        setRouteCoordinates(fallbackRoute);
+        // W przypadku błędu, utwórz proste linie
+        const segments: RouteSegment[] = [
+          ...sortedPendingPoints.map((point, i) => ({
+            coordinates: [currentLocation, point.location],
+            color: generateBlueColor(i),
+            destinationId: point.id,
+            isDelivered: false
+          })),
+          ...deliveredPoints.map(point => ({
+            coordinates: [currentLocation, point.location],
+            color: "rgba(76, 175, 80, 0.2)",
+            destinationId: point.id,
+            isDelivered: true
+          }))
+        ];
+        setRouteSegments(segments);
       }
     };
 
-    fetchRoute();
-  }, [points, currentLocation]);
+    fetchRoutes();
+  }, [points, currentLocation, isInitialized]);
 
   useEffect(() => {
-    if (points.length > 0 && mapRef.current) {
+    if (points.length > 0 && mapRef.current && !hasInitializedMap.current) {
       const coordinates = points.map(p => ({
         latitude: p.location.latitude,
         longitude: p.location.longitude
@@ -133,10 +250,13 @@ export default function DeliveryMap({
 
       mapRef.current.fitToCoordinates(coordinates, {
         edgePadding: { top: 80, right: 80, bottom: 80, left: 80 },
-        animated: true
+        animated: false
       });
+
+      hasInitializedMap.current = true;
     }
-  }, [points, currentLocation]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isInitialized]);
 
   const getMarkerColor = (status: DeliveryPoint["status"]): string => {
     switch (status) {
@@ -151,21 +271,21 @@ export default function DeliveryMap({
     }
   };
 
-  const handleMarkerPress = (point: DeliveryPoint) => {
-    setSelectedPoint(point);
-    if (onPointPress) {
-      onPointPress(point);
-    }
+  // Funkcja zwracająca stały numer paczki
+  const getDeliveryOrder = (point: DeliveryPoint): number => {
+    return deliveryOrderMap.current.get(point.id) || 0;
   };
 
-  const handleNavigate = () => {
-    if (selectedPoint) {
-      NavigationService.openNavigation(
-        selectedPoint.location,
-        selectedPoint.address
-      );
-    }
-  };
+  // Nie renderuj mapy dopóki nie jest zainicjalizowana
+  if (!isInitialized || !currentLocation) {
+    return (
+      <View style={styles.container}>
+        <View style={styles.loadingContainer}>
+          <Text style={styles.loadingText}>Initializing map...</Text>
+        </View>
+      </View>
+    );
+  }
 
   return (
     <View style={styles.container}>
@@ -189,10 +309,10 @@ export default function DeliveryMap({
               latitude: point.location.latitude,
               longitude: point.location.longitude
             }}
-            pinColor={getMarkerColor(point.status)}
-            onPress={() => handleMarkerPress(point)}
+            onPress={() => onPointPress && onPointPress(point)}
             title={point.address}
             description={`${point.recipientName} - ${point.packageId}`}
+            tracksViewChanges={!markersLoaded}
           >
             <View
               style={[
@@ -200,20 +320,55 @@ export default function DeliveryMap({
                 { backgroundColor: getMarkerColor(point.status) }
               ]}
             >
-              <Text style={styles.markerText}>
-                {point.orderNumber || index + 1}
-              </Text>
+              <Text style={styles.markerText}>{getDeliveryOrder(point)}</Text>
             </View>
           </Marker>
         ))}
 
-        {routeCoordinates.length > 1 && (
+        {/* Najpierw renderuj zielone (dostarczone) */}
+        {routeSegments
+          .filter(s => s.isDelivered)
+          .map((segment, index) => (
+            <Polyline
+              key={`route-delivered-${segment.destinationId}`}
+              coordinates={segment.coordinates}
+              strokeColor={segment.color}
+              strokeWidth={3}
+              lineCap="round"
+              lineJoin="round"
+              zIndex={1}
+            />
+          ))}
+
+        {/* Potem granatowe (dalsze pending) od najdalszych do najbliższych */}
+        {routeSegments
+          .filter(s => !s.isDelivered)
+          .slice(1)
+          .reverse()
+          .map((segment, index) => (
+            <Polyline
+              key={`route-secondary-${segment.destinationId}`}
+              coordinates={segment.coordinates}
+              strokeColor={segment.color}
+              strokeWidth={4}
+              lineCap="round"
+              lineJoin="round"
+              zIndex={10 + index}
+            />
+          ))}
+
+        {/* Na końcu najbliższa niebieska - zawsze na wierzchu */}
+        {routeSegments.filter(s => !s.isDelivered).length > 0 && (
           <Polyline
-            coordinates={routeCoordinates}
-            strokeColor="#2196F3"
-            strokeWidth={4}
+            key={`route-nearest-${
+              routeSegments.find(s => !s.isDelivered)?.destinationId
+            }`}
+            coordinates={routeSegments.find(s => !s.isDelivered)!.coordinates}
+            strokeColor="rgb(33, 150, 243)"
+            strokeWidth={5}
             lineCap="round"
             lineJoin="round"
+            zIndex={1000}
           />
         )}
       </MapView>
@@ -228,34 +383,6 @@ export default function DeliveryMap({
           <Text style={styles.legendText}>Delivered</Text>
         </View>
       </View>
-
-      {selectedPoint && (
-        <View style={styles.infoPanel}>
-          <View style={styles.infoPanelHeader}>
-            <View>
-              <Text style={styles.infoPanelTitle}>{selectedPoint.address}</Text>
-              <Text style={styles.infoPanelSubtitle}>
-                {selectedPoint.recipientName}
-              </Text>
-              <Text style={styles.infoPanelPackage}>
-                Package: {selectedPoint.packageId}
-              </Text>
-            </View>
-            <TouchableOpacity
-              onPress={() => setSelectedPoint(null)}
-              style={styles.closeButton}
-            >
-              <Text style={styles.closeButtonText}>✕</Text>
-            </TouchableOpacity>
-          </View>
-          <TouchableOpacity
-            style={styles.navigateButton}
-            onPress={handleNavigate}
-          >
-            <Text style={styles.navigateButtonText}>🧭 Navigate</Text>
-          </TouchableOpacity>
-        </View>
-      )}
     </View>
   );
 }
@@ -304,6 +431,16 @@ const styles = StyleSheet.create({
   },
   map: {
     flex: 1
+  },
+  loadingContainer: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    backgroundColor: "#f5f5f5"
+  },
+  loadingText: {
+    fontSize: 16,
+    color: "#666"
   },
   markerContainer: {
     width: 30,

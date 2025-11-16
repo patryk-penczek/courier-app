@@ -4,7 +4,6 @@ import { SpeechService } from "@/services/speech";
 import { DeliveryConfirmation, DeliveryPoint } from "@/types/delivery";
 import React, { useState } from "react";
 import {
-  Alert,
   Linking,
   ScrollView,
   StyleSheet,
@@ -49,57 +48,32 @@ export default function DeliveryPointDetails({
   };
 
   const handleConfirmDelivery = async (status: "delivered" | "failed") => {
-    Alert.alert(
-      "Confirmation",
-      status === "delivered"
-        ? "Are you sure you want to confirm delivery?"
-        : "Are you sure you want to mark as failed?",
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Confirm",
-          onPress: async () => {
-            setIsLoading(true);
-            try {
-              const confirmation: DeliveryConfirmation = {
-                pointId: point.id,
-                status,
-                timestamp: new Date().toISOString()
-              };
+    setIsLoading(true);
+    try {
+      const confirmation: DeliveryConfirmation = {
+        pointId: point.id,
+        status,
+        timestamp: new Date().toISOString()
+      };
 
-              await ApiService.confirmDelivery(confirmation);
+      await ApiService.confirmDelivery(confirmation);
 
-              if (onConfirm) {
-                onConfirm(confirmation);
-              }
-
-              Alert.alert(
-                "Success",
-                status === "delivered"
-                  ? "Delivery confirmed"
-                  : "Marked as failed"
-              );
-            } catch {
-              Alert.alert(
-                "Notice",
-                "Confirmation saved offline. Will be sent when connection is available."
-              );
-
-              if (onConfirm) {
-                const confirmation: DeliveryConfirmation = {
-                  pointId: point.id,
-                  status,
-                  timestamp: new Date().toISOString()
-                };
-                onConfirm(confirmation);
-              }
-            } finally {
-              setIsLoading(false);
-            }
-          }
-        }
-      ]
-    );
+      if (onConfirm) {
+        onConfirm(confirmation);
+      }
+    } catch {
+      // Zapisz offline bez powiadomienia
+      if (onConfirm) {
+        const confirmation: DeliveryConfirmation = {
+          pointId: point.id,
+          status,
+          timestamp: new Date().toISOString()
+        };
+        onConfirm(confirmation);
+      }
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const getStatusText = (status: DeliveryPoint["status"]): string => {
